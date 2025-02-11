@@ -35,11 +35,10 @@ impl Editor {
         }
     }
 
-    /// Updates the editor’s selection state.
+    /// Updates the editor’s selection state based on the given boundaries.
     ///
     /// If `selection_start` equals `selection_end`, the selection is cleared.
-    /// Otherwise, the method extracts the substring from `content` between these
-    /// indices and sets it as the current selection.
+    /// Otherwise, it extracts the substring from `content` between these indices.
     fn update_selection(&mut self, content: String, selection_start: usize, selection_end: usize) {
         if selection_start == selection_end {
             self.selection.clear();
@@ -49,6 +48,36 @@ impl Editor {
         }
         self.selection_start = selection_start;
         self.selection_end = selection_end;
+    }
+
+    /// Applies a transformation function only to the current selection.
+    ///
+    /// The function cleans the provided content (removing any capture delimiters),
+    /// then splits the text into three parts: prefix, the currently selected text, and suffix.
+    /// It then applies the provided transformation to the selected text,
+    /// updates the selection (and its boundaries), and returns the reassembled text
+    /// with the capture delimiters reinserted.
+    fn apply_transformation<F>(&mut self, content: &str, transform: F) -> String
+    where
+        F: Fn(&str) -> String,
+    {
+        // Remove any markers from the content.
+        let cleaned_content = content.replace("<|", "").replace("|>", "");
+
+        // Grab the prefix, selection, and suffix.
+        let prefix = &cleaned_content[..self.selection_start];
+        let selected = &cleaned_content[self.selection_start..self.selection_end];
+        let suffix = &cleaned_content[self.selection_end..];
+
+        // Apply the transformation.
+        let new_selected = transform(selected);
+
+        // Update internal state.
+        self.selection = new_selected.clone();
+        self.selection_end = self.selection_start + new_selected.len();
+
+        // Reassemble the content inserting the delimiters only for display.
+        format!("{}<|{}|>{}", prefix, new_selected, suffix)
     }
 
     /// Runs the editor inside a Cursive text UI.
@@ -64,7 +93,6 @@ impl Editor {
         // -------------------------------------------------
         // Cursor Movement Callbacks (WASD controls)
         // -------------------------------------------------
-
         siv.add_global_callback(Event::CtrlChar('d'), |s| {
             s.call_on_name("main", |view: &mut TextArea| {
                 let content = view.get_content();
@@ -215,7 +243,7 @@ impl Editor {
                             if let Some(ch) = content[orig_cursor..].chars().next() {
                                 let char_len = ch.len_utf8();
                                 let end = orig_cursor + char_len;
-                                // Update current selection and also record the original boundaries.
+                                // Update current selection and record original boundaries.
                                 ed.update_selection(content.to_string(), orig_cursor, end);
                                 ed.original_selection_start = orig_cursor;
                                 ed.original_selection_end = end;
@@ -244,7 +272,7 @@ impl Editor {
         }
 
         // -------------------------------------------------
-        // Reduce Selection with Ctrl+n
+        // Reduce Selection with Ctrl+n (Shrink back to original)
         // -------------------------------------------------
         {
             let editor = editor.clone();
@@ -274,35 +302,50 @@ impl Editor {
                         &cleaned_content[orig_end..]
                     );
                     view.set_content(new_content);
-                    // Optionally, reset the cursor to the end of the original selection.
+                    // Position the cursor at the original selection start, adjusted for the opening delimiter.
                     view.set_cursor(orig_start + 2);
                 });
             });
         }
 
         // -------------------------------------------------
-        // Transformation Menu with Ctrl+u
+        // Transformation Menu with Ctrl+u - only applies to selected text.
         // -------------------------------------------------
-        siv.add_global_callback(Event::CtrlChar('u'), |s| {
-            let mut sv: SelectView<Choice> = SelectView::new();
-            sv.add_item("Uppercase", Choice::Upper);
-            sv.add_item("Lowercase", Choice::Lower);
-            sv.add_item("Capitalized", Choice::Cap);
+        {
+            let editor = editor.clone();
+            siv.add_global_callback(Event::CtrlChar('u'), move |s| {
+                let mut sv: SelectView<Choice> = SelectView::new();
+                sv.add_item("Uppercase", Choice::Upper);
+                sv.add_item("Lowercase", Choice::Lower);
+                sv.add_item("Capitalized", Choice::Cap);
 
-            sv.set_on_submit(|s, item| {
-                s.call_on_name("main", |view: &mut TextArea| {
-                    let content = view.get_content();
-                    let new_content = match item {
-                        Choice::Upper => content.to_uppercase(),
-                        Choice::Lower => content.to_lowercase(),
-                        Choice::Cap => capitalize(&content),
-                    };
-                    view.set_content(new_content);
+                // On submit, only transform the selected text.
+                let value = editor.clone();
+                sv.set_on_submit(move |s, item| {
+                    s.call_on_name("main", |view: &mut TextArea| {
+                        let content = view.get_content().to_string();
+                        let mut ed = value.lock().unwrap();
+                        // Use the new API to apply a transformation only to the selection.
+                        let new_content = match item {
+                            Choice::Upper => {
+                                ed.apply_transformation(&content, |s| s.to_uppercase())
+                            }
+                            Choice::Lower => {
+                                ed.apply_transformation(&content, |s| s.to_lowercase())
+                            }
+                            Choice::Cap => ed.apply_transformation(&content, |s| capitalize(s)),
+                        };
+                        view.set_content(new_content);
+                    });
+                    s.pop_layer();
                 });
-                s.pop_layer();
+                s.add_layer(sv);
             });
-            s.add_layer(sv);
-        });
+        }
+
+        // -------------------------------------------------
+        // (Existing transformation menu API now only applies to the selection.)
+        // -------------------------------------------------
 
         siv.run();
     }
