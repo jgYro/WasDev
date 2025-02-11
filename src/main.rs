@@ -8,6 +8,7 @@ enum Choice {
     Upper,
     Lower,
     Cap,
+    Rev,
 }
 
 /// The `Editor` struct now holds:
@@ -318,6 +319,7 @@ impl Editor {
                 sv.add_item("Uppercase", Choice::Upper);
                 sv.add_item("Lowercase", Choice::Lower);
                 sv.add_item("Capitalized", Choice::Cap);
+                sv.add_item("Reverse", Choice::Rev);
 
                 // On submit, only transform the selected text.
                 let value = editor.clone();
@@ -325,7 +327,8 @@ impl Editor {
                     s.call_on_name("main", |view: &mut TextArea| {
                         let content = view.get_content().to_string();
                         let mut ed = value.lock().unwrap();
-                        // Use the new API to apply a transformation only to the selection.
+
+                        // Use the transformation API to apply a transformation only to the selection.
                         let new_content = match item {
                             Choice::Upper => {
                                 ed.apply_transformation(&content, |s| s.to_uppercase())
@@ -334,6 +337,9 @@ impl Editor {
                                 ed.apply_transformation(&content, |s| s.to_lowercase())
                             }
                             Choice::Cap => ed.apply_transformation(&content, |s| capitalize(s)),
+                            Choice::Rev => ed.apply_transformation(&content, |s| {
+                                s.to_string().chars().rev().collect()
+                            }),
                         };
                         view.set_content(new_content);
                     });
@@ -352,7 +358,6 @@ impl Editor {
 }
 
 /// Capitalizes each word in the provided text.
-/// For example, "hello world" becomes "Hello World".
 fn capitalize(text: &str) -> String {
     text.split_whitespace()
         .map(|word| {
@@ -366,6 +371,7 @@ fn capitalize(text: &str) -> String {
         .join(" ")
 }
 
+/// Do the thing
 fn main() {
     let editor = Editor::new();
     editor.run();
