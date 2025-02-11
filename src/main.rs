@@ -1,5 +1,6 @@
 use cursive::views::{SelectView, TextArea};
 use cursive::{event::Event, traits::*};
+use std::sync::{Arc, Mutex};
 
 /// Enum representing the available text transformation choices.
 #[derive(Clone, Copy, Debug)]
@@ -9,14 +10,17 @@ enum Choice {
     Cap,
 }
 
-/// The `Editor` struct holds our editor's state:
-/// - `selection`: the currently highlighted text (if any)
-/// - `selection_start` and `selection_end`: byte indices of the selection within the text
+/// The `Editor` struct now holds:
+/// - `selection`: the current highlighted text (if any)
+/// - `selection_start` and `selection_end`: byte indices for the current selection
+/// - `original_selection_start` and `original_selection_end`: the original boundaries when the selection was first created
 #[derive(Clone)]
 struct Editor {
     selection: String,
     selection_start: usize,
     selection_end: usize,
+    original_selection_start: usize,
+    original_selection_end: usize,
 }
 
 impl Editor {
@@ -26,6 +30,8 @@ impl Editor {
             selection: String::new(),
             selection_start: 0,
             selection_end: 0,
+            original_selection_start: 0,
+            original_selection_end: 0,
         }
     }
 
@@ -36,20 +42,19 @@ impl Editor {
     /// indices and sets it as the current selection.
     fn update_selection(&mut self, content: String, selection_start: usize, selection_end: usize) {
         if selection_start == selection_end {
-            // No range specified: clear the selection.
             self.selection.clear();
         } else {
-            // Slice the content to obtain the selection.
-            let update_selection = &content[selection_start..selection_end];
-            self.selection = update_selection.to_string();
+            let sel = &content[selection_start..selection_end];
+            self.selection = sel.to_string();
         }
         self.selection_start = selection_start;
         self.selection_end = selection_end;
     }
 
     /// Runs the editor inside a Cursive text UI.
-    fn run(mut self) {
-        // Initialize the Cursive TUI.
+    fn run(self) {
+        // Use an Arc<Mutex<Editor>> for shared, mutable, thread-safe state.
+        let editor = Arc::new(Mutex::new(self));
         let mut siv = cursive::default();
 
         // Create a full-screen text area named "main".
@@ -60,195 +65,230 @@ impl Editor {
         // Cursor Movement Callbacks (WASD controls)
         // -------------------------------------------------
 
-        // Move the cursor right when Ctrl+d is pressed.
         siv.add_global_callback(Event::CtrlChar('d'), |s| {
             s.call_on_name("main", |view: &mut TextArea| {
                 let content = view.get_content();
                 let cur = view.cursor();
-                // Do nothing if already at the end.
-                if cur >= content.len() {
-                    return;
+                if cur < content.len() {
+                    if let Some(next_char) = content[cur..].chars().next() {
+                        view.set_cursor(cur + next_char.len_utf8());
+                    }
                 }
-                // Get the next character and advance the cursor by its byte length.
-                if let Some(next_char) = content[cur..].chars().next() {
-                    let new_cursor = cur + next_char.len_utf8();
+            });
+        });
+
+        siv.add_global_callback(Event::CtrlChar('a'), |s| {
+            s.call_on_name("main", |view: &mut TextArea| {
+                let content = view.get_content();
+                let cur = view.cursor();
+                if cur > 0 {
+                    let new_cursor = content[..cur]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                     view.set_cursor(new_cursor);
                 }
             });
         });
 
-        // Move the cursor left when Ctrl+a is pressed.
-        siv.add_global_callback(Event::CtrlChar('a'), |s| {
-            s.call_on_name("main", |view: &mut TextArea| {
-                let content = view.get_content();
-                let cur = view.cursor();
-                // Do nothing if already at the beginning.
-                if cur == 0 {
-                    return;
-                }
-                // Find the beginning of the previous character.
-                let new_cursor = content[..cur]
-                    .char_indices()
-                    .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                view.set_cursor(new_cursor);
-            });
-        });
-
-        // Move the cursor down when Ctrl+s is pressed.
         siv.add_global_callback(Event::CtrlChar('s'), |s| {
             s.call_on_name("main", |view: &mut TextArea| {
                 let content = view.get_content();
                 let cur = view.cursor();
-
-                // Determine the start of the current line.
                 let current_line_start = content[..cur].rfind('\n').map(|pos| pos + 1).unwrap_or(0);
-                // Calculate the current column (number of characters from the line start).
                 let col = content[current_line_start..cur].chars().count();
-
-                // Find the end of the current line.
                 let current_line_end = content[cur..]
                     .find('\n')
                     .map(|pos| cur + pos)
                     .unwrap_or(content.len());
-
-                // If there is no next line, do nothing.
-                if current_line_end >= content.len() {
-                    return;
-                }
-
-                // The next line starts immediately after the newline character.
-                let next_line_start = current_line_end + 1;
-                // Determine the end of the next line.
-                let next_line_end = content[next_line_start..]
-                    .find('\n')
-                    .map(|pos| next_line_start + pos)
-                    .unwrap_or(content.len());
-
-                // Count the number of characters in the next line.
-                let next_line_length = content[next_line_start..next_line_end].chars().count();
-                // The target column is the same as the current one unless the next line is shorter.
-                let new_col = col.min(next_line_length);
-
-                // Convert the target column (character count) to a byte offset.
-                let mut byte_offset = next_line_start;
-                for (i, (b_index, _)) in content[next_line_start..].char_indices().enumerate() {
-                    if i == new_col {
-                        byte_offset = next_line_start + b_index;
-                        break;
+                if current_line_end < content.len() {
+                    let next_line_start = current_line_end + 1;
+                    let next_line_end = content[next_line_start..]
+                        .find('\n')
+                        .map(|pos| next_line_start + pos)
+                        .unwrap_or(content.len());
+                    let next_line_length = content[next_line_start..next_line_end].chars().count();
+                    let new_col = col.min(next_line_length);
+                    let mut byte_offset = next_line_start;
+                    for (i, (b_index, _)) in content[next_line_start..].char_indices().enumerate() {
+                        if i == new_col {
+                            byte_offset = next_line_start + b_index;
+                            break;
+                        }
                     }
+                    view.set_cursor(byte_offset);
                 }
-                view.set_cursor(byte_offset);
             });
         });
 
-        // Move the cursor up when Ctrl+w is pressed.
         siv.add_global_callback(Event::CtrlChar('w'), |s| {
             s.call_on_name("main", |view: &mut TextArea| {
                 let content = view.get_content();
                 let cur = view.cursor();
-
-                // Find the start of the current line.
                 let current_line_start = content[..cur].rfind('\n').map(|pos| pos + 1).unwrap_or(0);
-                // Calculate the current column.
                 let col = content[current_line_start..cur].chars().count();
-
-                // If there is no previous line, do nothing.
-                if current_line_start == 0 {
-                    return;
-                }
-
-                // Determine the start of the previous line.
-                let prev_line_start = content[..current_line_start - 1]
-                    .rfind('\n')
-                    .map(|pos| pos + 1)
-                    .unwrap_or(0);
-                // Get the number of characters in the previous line.
-                let prev_line_length = content[prev_line_start..current_line_start - 1]
-                    .chars()
-                    .count();
-                // The new column is the lesser of the current column and the previous line's length.
-                let new_col = col.min(prev_line_length);
-
-                // Convert the new column to a byte offset.
-                let mut byte_offset = prev_line_start;
-                for (i, (b_index, _)) in content[prev_line_start..].char_indices().enumerate() {
-                    if i == new_col {
-                        byte_offset = prev_line_start + b_index;
-                        break;
+                if current_line_start > 0 {
+                    let prev_line_start = content[..current_line_start - 1]
+                        .rfind('\n')
+                        .map(|pos| pos + 1)
+                        .unwrap_or(0);
+                    let prev_line_length = content[prev_line_start..current_line_start - 1]
+                        .chars()
+                        .count();
+                    let new_col = col.min(prev_line_length);
+                    let mut byte_offset = prev_line_start;
+                    for (i, (b_index, _)) in content[prev_line_start..].char_indices().enumerate() {
+                        if i == new_col {
+                            byte_offset = prev_line_start + b_index;
+                            break;
+                        }
                     }
+                    view.set_cursor(byte_offset);
                 }
-                view.set_cursor(byte_offset);
             });
         });
+
+        // -------------------------------------------------
+        // Custom Selection Expansion with Ctrl+p
+        // -------------------------------------------------
+        {
+            let editor = editor.clone();
+            siv.add_global_callback(Event::CtrlChar('p'), move |s| {
+                s.call_on_name("main", |view: &mut TextArea| {
+                    let content = view.get_content();
+                    let content_str = content.to_string();
+                    // Remove any existing capture delimiters.
+                    let cleaned_content = content_str.replace("<|", "").replace("|>", "");
+
+                    // Get current selection boundaries from shared state.
+                    let (selection_start, selection_end) = {
+                        let ed = editor.lock().unwrap();
+                        (ed.selection_start, ed.selection_end)
+                    };
+
+                    // Expand left: search backwards in the cleaned text for a space.
+                    let new_bound_l = if selection_start > 0 {
+                        cleaned_content[..selection_start]
+                            .rfind(' ')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    // Expand right: search forwards for a space.
+                    let new_bound_r = match cleaned_content[selection_end..].find(' ') {
+                        Some(pos) => selection_end + pos,
+                        None => cleaned_content.len(),
+                    };
+
+                    // Update the editor state with the cleaned text and new boundaries.
+                    let mut ed = editor.lock().unwrap();
+                    ed.update_selection(cleaned_content.clone(), new_bound_l, new_bound_r);
+
+                    // Update the view: insert delimiters for display.
+                    let new_content = format!(
+                        "{}<|{}|>{}",
+                        &cleaned_content[..new_bound_l],
+                        ed.selection,
+                        &cleaned_content[new_bound_r..]
+                    );
+                    view.set_content(new_content);
+                });
+            });
+        }
 
         // -------------------------------------------------
         // Toggle Selection with Ctrl+Space
         // -------------------------------------------------
-        //
-        // If no selection is active, this will select the character at the
-        // current cursor position by inserting the markers "<|" and "|>".
-        // If a selection is active, it will remove the markers and clear the selection.
-        siv.add_global_callback(Event::CtrlChar(' '), move |s| {
-            s.call_on_name("main", |view: &mut TextArea| {
-                // Store the original cursor position before modifying the content.
-                let orig_cursor = view.cursor();
-                let content = view.get_content();
-
-                if self.selection.is_empty() {
-                    // ---------- Selection (Highlight) ----------
-                    // If no selection is active, select the character at the cursor.
-                    if orig_cursor < content.len() {
-                        if let Some(ch) = content[orig_cursor..].chars().next() {
-                            let char_len = ch.len_utf8();
-                            let end = orig_cursor + char_len;
-                            // Update the selection state with the chosen character.
-                            self.update_selection(content.to_string(), orig_cursor, end);
-                            // Rebuild the content with markers inserted around the selected character.
-                            let new_content = format!(
-                                "{}<|{}|>{}",
-                                &content[..orig_cursor],
-                                self.selection,
-                                &content[end..]
-                            );
-                            view.set_content(new_content);
-                            // Adjust the cursor to be positioned after the opening marker.
-                            // (Here, 2 is the length of "<|".)
-                            view.set_cursor(orig_cursor + 2);
+        {
+            let editor = editor.clone();
+            siv.add_global_callback(Event::CtrlChar(' '), move |s| {
+                s.call_on_name("main", |view: &mut TextArea| {
+                    let orig_cursor = view.cursor();
+                    let content = view.get_content();
+                    let mut ed = editor.lock().unwrap();
+                    if ed.selection.is_empty() {
+                        // When no selection is active, select the character at the cursor.
+                        if orig_cursor < content.len() {
+                            if let Some(ch) = content[orig_cursor..].chars().next() {
+                                let char_len = ch.len_utf8();
+                                let end = orig_cursor + char_len;
+                                // Update current selection and also record the original boundaries.
+                                ed.update_selection(content.to_string(), orig_cursor, end);
+                                ed.original_selection_start = orig_cursor;
+                                ed.original_selection_end = end;
+                                let new_content = format!(
+                                    "{}<|{}|>{}",
+                                    &content[..orig_cursor],
+                                    ed.selection,
+                                    &content[end..]
+                                );
+                                view.set_content(new_content);
+                                view.set_cursor(orig_cursor + 2);
+                            }
                         }
+                    } else {
+                        // Remove the inserted markers and clear the selection.
+                        let marker = format!("<|{}|>", ed.selection);
+                        let new_content = content.replace(&marker, &ed.selection);
+                        view.set_content(new_content);
+                        ed.selection.clear();
+                        ed.selection_start = orig_cursor;
+                        ed.selection_end = orig_cursor;
+                        view.set_cursor(orig_cursor.saturating_sub(2));
                     }
-                } else {
-                    // ---------- Unselection (Remove Highlight) ----------
-                    // When a selection is active, remove the inserted markers.
-                    let marker = format!("<|{}|>", self.selection);
-                    let new_content = content.replace(&marker, &self.selection);
-                    view.set_content(new_content);
-                    // Clear the selection state.
-                    self.selection.clear();
-                    self.selection_start = orig_cursor;
-                    self.selection_end = orig_cursor;
-                    // Adjust the cursor back by the length of the removed marker.
-                    // Use `saturating_sub` to avoid underflow when at very low indices.
-                    view.set_cursor(orig_cursor.saturating_sub(2));
-                }
+                });
             });
-        });
+        }
+
+        // -------------------------------------------------
+        // Reduce Selection with Ctrl+n
+        // -------------------------------------------------
+        {
+            let editor = editor.clone();
+            siv.add_global_callback(Event::CtrlChar('n'), move |s| {
+                s.call_on_name("main", |view: &mut TextArea| {
+                    // First remove any markers from the view.
+                    let content = view.get_content();
+                    let cleaned_content = content.replace("<|", "").replace("|>", "");
+
+                    // Retrieve the original selection boundaries.
+                    let (orig_start, orig_end) = {
+                        let ed = editor.lock().unwrap();
+                        (ed.original_selection_start, ed.original_selection_end)
+                    };
+
+                    // Update the internal selection back to the original boundaries.
+                    {
+                        let mut ed = editor.lock().unwrap();
+                        ed.update_selection(cleaned_content.clone(), orig_start, orig_end);
+                    }
+
+                    // Update the view with the original selection reinserted.
+                    let new_content = format!(
+                        "{}<|{}|>{}",
+                        &cleaned_content[..orig_start],
+                        &cleaned_content[orig_start..orig_end],
+                        &cleaned_content[orig_end..]
+                    );
+                    view.set_content(new_content);
+                    // Optionally, reset the cursor to the end of the original selection.
+                    view.set_cursor(orig_start + 2);
+                });
+            });
+        }
 
         // -------------------------------------------------
         // Transformation Menu with Ctrl+u
         // -------------------------------------------------
-        //
-        // Opens a menu that lets you transform the text in the main text area.
-        // Options include converting the text to uppercase, lowercase, or capitalized.
         siv.add_global_callback(Event::CtrlChar('u'), |s| {
-            // Create a SelectView for the transformation choices.
             let mut sv: SelectView<Choice> = SelectView::new();
             sv.add_item("Uppercase", Choice::Upper);
             sv.add_item("Lowercase", Choice::Lower);
             sv.add_item("Capitalized", Choice::Cap);
 
-            // When a choice is submitted, transform the text accordingly.
             sv.set_on_submit(|s, item| {
                 s.call_on_name("main", |view: &mut TextArea| {
                     let content = view.get_content();
@@ -259,21 +299,16 @@ impl Editor {
                     };
                     view.set_content(new_content);
                 });
-                // Remove the transformation menu layer.
                 s.pop_layer();
             });
-
-            // Add the transformation menu as a new layer.
             s.add_layer(sv);
         });
 
-        // Run the Cursive event loop.
         siv.run();
     }
 }
 
 /// Capitalizes each word in the provided text.
-///
 /// For example, "hello world" becomes "Hello World".
 fn capitalize(text: &str) -> String {
     text.split_whitespace()
@@ -288,7 +323,6 @@ fn capitalize(text: &str) -> String {
         .join(" ")
 }
 
-/// Entry point of the program.
 fn main() {
     let editor = Editor::new();
     editor.run();
