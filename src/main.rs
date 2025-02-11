@@ -8,15 +8,33 @@ enum Choice {
     Cap,
 }
 
+#[derive(Clone)]
 struct Editor {
     selection: String,
+    selection_start: usize,
+    selection_end: usize,
 }
 
 impl Editor {
     fn new() -> Self {
         Self {
             selection: String::new(),
+            selection_start: 0,
+            selection_end: 0,
         }
+    }
+
+    fn update_selection(&mut self, content: String, selection_start: usize, selection_end: usize) {
+        if selection_start == selection_end {
+            // When no selection is intended, just clear the selection.
+            self.selection.clear();
+        } else {
+            // Otherwise, slice normally (ensure these indices are valid)
+            let update_selection = &content[selection_start..selection_end];
+            self.selection = update_selection.to_string();
+        }
+        self.selection_start = selection_start;
+        self.selection_end = selection_end;
     }
 
     fn run(mut self) {
@@ -169,17 +187,42 @@ impl Editor {
         });
 
         siv.add_global_callback(Event::CtrlChar(' '), move |s| {
-            // Handle space key press here
             s.call_on_name("main", |view: &mut TextArea| {
-                if self.selection == "" {
-                    self.selection = view.get_content().to_string();
-                    let new_content = format!("<|{}|>", self.selection);
-                    view.set_content(new_content);
+                // Store the original cursor position before modifying the content.
+                let orig_cursor = view.cursor();
+                let content = view.get_content();
+
+                if self.selection.is_empty() {
+                    // Selecting: make sure we're not at the end.
+                    if orig_cursor < content.len() {
+                        if let Some(ch) = content[orig_cursor..].chars().next() {
+                            let char_len = ch.len_utf8();
+                            let end = orig_cursor + char_len;
+                            // Update the selection state.
+                            self.update_selection(content.to_string(), orig_cursor, end);
+                            // Insert markers around the selected character.
+                            let new_content = format!(
+                                "{}<|{}|>{}",
+                                &content[..orig_cursor],
+                                self.selection,
+                                &content[end..]
+                            );
+                            view.set_content(new_content);
+                            // Set the cursor relative to the original position.
+                            view.set_cursor(orig_cursor + 2);
+                        }
+                    }
                 } else {
-                    let unselect = format!("<|{}|>", self.selection);
-                    let new_content = view.get_content().replace(&unselect, &self.selection);
+                    // Unselecting: remove the markers.
+                    let marker = format!("<|{}|>", self.selection);
+                    let new_content = content.replace(&marker, &self.selection);
                     view.set_content(new_content);
-                    self.selection = "".to_string();
+                    // Reset the selection state.
+                    self.selection.clear();
+                    self.selection_start = orig_cursor;
+                    self.selection_end = orig_cursor;
+                    // Restore the cursor relative to the original position.
+                    view.set_cursor(orig_cursor - 2);
                 }
             });
         });
